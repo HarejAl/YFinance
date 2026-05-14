@@ -13,7 +13,7 @@ st.title("📈 Stock Trend & Future Projection Analyzer")
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
-ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., SPY, AAPL, TSLA)", value="SPY").upper()
+ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., AAPL, TSLA)", value="AAPL").upper()
 p_years = st.sidebar.slider("P: Historical Years to analyze", min_value=1, max_value=20, value=5)
 
 st.sidebar.markdown("---")
