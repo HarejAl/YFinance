@@ -18,15 +18,23 @@ p_years = st.sidebar.slider("P: Historical Years to analyze", min_value=1, max_v
 
 st.sidebar.markdown("---")
 model_type = st.sidebar.radio("Fitting Model", options=["Polynomial", "Exponential"])
-# Only show polynomial order slider if Polynomial is selected
 if model_type == "Polynomial":
     poly_order = st.sidebar.slider("n: Polynomial Order", min_value=1, max_value=5, value=2)
 else:
-    poly_order = 1 # Not used for exponential, but kept for variable safety
+    poly_order = 1 
 
 st.sidebar.markdown("---")
 y_years = st.sidebar.slider("Y: Future Years to predict", min_value=1, max_value=10, value=2)
-show_fundamentals = st.sidebar.checkbox("Show 2nd Panel (PE, P/B & Volume)", value=True)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Bottom Panel Metrics")
+show_fundamentals = st.sidebar.checkbox("Show Current Fundamentals Summary", value=True)
+
+selected_indicators = st.sidebar.multiselect(
+    "Select Historical Indicators to Plot:",
+    ["Volume", "30-Day Rolling Volatility", "RSI (14-Day)", "MACD"],
+    default=["Volume", "30-Day Rolling Volatility"]
+)
 
 @st.cache_data
 def load_data(ticker, years):
@@ -58,16 +66,30 @@ if ticker:
         y_hist = df['Close'].values
         dates_hist = df['Date']
         
-        # 2. Fit the Model (Polynomial vs Exponential)
+        # --- CALCULATE NEW INDICATORS ---
+        df['Daily_Return'] = df['Close'].pct_change()
+        df['Rolling_Vol'] = df['Daily_Return'].rolling(window=30).std() * np.sqrt(252) * 100
+        
+        delta = df['Close'].diff()
+        up = delta.clip(lower=0)
+        down = -1 * delta.clip(upper=0)
+        ema_up = up.ewm(com=13, adjust=False).mean()
+        ema_down = down.ewm(com=13, adjust=False).mean()
+        rs = ema_up / ema_down
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+        # 2. Fit the Model
         if model_type == "Polynomial":
             coeffs = np.polyfit(x_hist, y_hist, poly_order)
             poly_eq = np.poly1d(coeffs)
             y_fit = poly_eq(x_hist)
             model_name = f'Polynomial Fit (n={poly_order})'
-            
         elif model_type == "Exponential":
-            # To fit y = A * e^(Bx), we fit a line to ln(y) = ln(A) + Bx
-            # This requires y_hist to be strictly positive (which stock prices are)
             coeffs = np.polyfit(x_hist, np.log(y_hist), 1)
             B = coeffs[0]
             A = np.exp(coeffs[1])
@@ -76,19 +98,16 @@ if ticker:
 
         r2 = r2_score(y_hist, y_fit)
         
-        # --- THE FIX: Normalized Volatility ---
-        # Calculate the relative (percentage) deviation from the fitted line
         normalized_residuals = (y_hist - y_fit) / y_fit
-        norm_std = np.std(normalized_residuals) # This is the percentage standard deviation
+        norm_std = np.std(normalized_residuals)
         
-        # Calculate the upper and lower shadows by scaling the fit day-by-day
         hist_upper_bound = y_fit * (1 + norm_std)
         hist_lower_bound = y_fit * (1 - norm_std)
         
         st.subheader(f"Historical Analysis: {ticker}")
         col1, col2 = st.columns(2)
-        col1.metric("$R^2$ (Fit Quality)", f"{r2:.4f}")
-        col2.metric("Normalized $\sigma$ (Relative Volatility)", f"{(norm_std * 100):.2f}%")
+        col1.metric("$R^2$ (Fit Quality)", f"{r2:.4f}", help="Measures how closely the fitted line matches actual price.")
+        col2.metric("Normalized $\sigma$ (Relative Volatility)", f"{(norm_std * 100):.2f}%", help="Standard deviation relative to the trendline.")
 
         # 3. Future Prediction
         last_date = df['Date'].max()
@@ -98,69 +117,100 @@ if ticker:
         x_future = np.linspace(last_day_val + 1, last_day_val + future_days, future_days)
         dates_future = [pd.to_datetime(last_date) + timedelta(days=int(d)) for d in range(1, future_days + 1)]
         
-        # Extrapolate the base future trend using the chosen model
         if model_type == "Polynomial":
-            base_future = poly_eq(x_future)
+            average_scenario = poly_eq(x_future)
         elif model_type == "Exponential":
-            base_future = A * np.exp(B * x_future)
+            average_scenario = A * np.exp(B * x_future)
             
-        # Create the diverging cone using the normalized standard deviation
-        # We scale the variance by sqrt(t) where t is time in years to replicate an expanding uncertainty cone
         time_in_years = np.linspace(1/365, y_years, future_days)
         expanding_uncertainty = norm_std * np.sqrt(time_in_years)
         
-        best_scenario = base_future * (1 + expanding_uncertainty)
-        worst_scenario = base_future * (1 - expanding_uncertainty)
+        best_scenario = average_scenario * (1 + expanding_uncertainty)
+        worst_scenario = average_scenario * (1 - expanding_uncertainty)
 
         # --- Plotting Main Chart ---
         fig = go.Figure()
 
-        # Upper shadow (+sigma, Red) using normalized bounds
         fig.add_trace(go.Scatter(x=dates_hist, y=hist_upper_bound, mode='lines', line=dict(width=0), showlegend=False))
-        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0),
-            fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)', name='Red Shadow (+σ)'))
+        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)', name='Red Shadow (+σ)'))
 
-        # Lower shadow (-sigma, Green) using normalized bounds
         fig.add_trace(go.Scatter(x=dates_hist, y=hist_lower_bound, mode='lines', line=dict(width=0), showlegend=False))
-        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0),
-            fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)', name='Green Shadow (-σ)'))
+        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)', name='Green Shadow (-σ)'))
 
-        # Actual Price & Fit
         fig.add_trace(go.Scatter(x=dates_hist, y=y_hist, mode='lines', name='Actual Price', line=dict(color='black', width=1.5)))
         fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', name=model_name, line=dict(color='blue', dash='dash')))
 
-        # Future Projections
-        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(best_scenario),
-            mode='lines', name='Best Scenario (+1σ)', line=dict(color='green', dash='dot', width=2)))
-        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(worst_scenario),
-            mode='lines', name='Worst Scenario (-1σ)', line=dict(color='red', dash='dot', width=2)))
-        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(base_future),
-            mode='lines', name='Expected Trend', line=dict(color='grey', dash='dash', width=1)))
+        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(best_scenario), mode='lines', name='Best Scenario (+1σ)', line=dict(color='green', dash='dot', width=2)))
+        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(worst_scenario), mode='lines', name='Worst Scenario (-1σ)', line=dict(color='red', dash='dot', width=2)))
+        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(average_scenario), mode='lines', name='Average/Expected Trend', line=dict(color='grey', dash='dash', width=2)))
 
-        # fig.add_vline(x=last_date.strftime('%Y-%m-%d'), line_width=2, line_dash="solid", line_color="black", 
-        #               annotation_text="TODAY", annotation_position="top left")
+        # fig.add_vline(x=last_date.strftime('%Y-%m-%d'), line_width=2, line_dash="solid", line_color="black", annotation_text="TODAY", annotation_position="top left")
 
         fig.update_layout(title=f"{ticker} Price Projection ({model_type} Model)", xaxis_title="Date", yaxis_title="Price", height=600, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- Panel 2: Fundamentals & Volume ---
+        # --- Panel 2: Fundamentals Summary ---
         if show_fundamentals:
             st.markdown("---")
-            st.subheader(f"Fundamental Analysis & Volume: {ticker}")
-            
+            st.subheader(f"Current Fundamental Snapshot: {ticker}")
             with st.spinner("Fetching fundamentals..."):
                 info = load_fundamentals(ticker)
                 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Trailing P/E", round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else "N/A")
-            col2.metric("Forward P/E", round(info.get('forwardPE', 0), 2) if info.get('forwardPE') else "N/A")
-            col3.metric("Price-to-Book (P/B)", round(info.get('priceToBook', 0), 2) if info.get('priceToBook') else "N/A")
-            col4.metric("Dividend Yield", f"{round(info.get('dividendYield', 0) * 100, 2)}%" if info.get('dividendYield') else "N/A")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Beta", round(info.get('beta', 0), 2) if info.get('beta') else "N/A", help="Systemic risk vs market.")
+            col2.metric("Trailing P/E", round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else "N/A", help="Current price / past 12m EPS.")
+            col3.metric("Forward P/E", round(info.get('forwardPE', 0), 2) if info.get('forwardPE') else "N/A", help="Current price / next 12m estimated EPS.")
+            col4.metric("Price-to-Book (P/B)", round(info.get('priceToBook', 0), 2) if info.get('priceToBook') else "N/A", help="Market value vs book value.")
             
-            fig_vol = go.Figure()
+            raw_yield = info.get('dividendYield') or info.get('trailingAnnualDividendYield') or info.get('yield')
+            if raw_yield is not None:
+                actual_yield = raw_yield * 100 if raw_yield < 0.5 else raw_yield
+                div_yield_display = f"{round(actual_yield, 2)}%"
+            else:
+                div_yield_display = "N/A"
+            col5.metric("Dividend Yield", div_yield_display, help="Annual dividend payout / stock price.")
+
+        # --- Panel 3: Dynamic Historical Indicators ---
+        if selected_indicators:
+            st.markdown("---")
+            st.subheader("Historical Indicators")
+            
+            num_plots = len(selected_indicators)
+            fig_ind = make_subplots(rows=num_plots, cols=1, shared_xaxes=True, vertical_spacing=0.05, subplot_titles=selected_indicators)
+            
             colors = ['green' if row['Close'] >= row['Open'] else 'red' for index, row in df.iterrows()]
-            
-            fig_vol.add_trace(go.Bar(x=df['Date'], y=df['Volume'], marker_color=colors, name="Volume"))
-            fig_vol.update_layout(title="Historical Trading Volume", xaxis_title="Date", yaxis_title="Volume", height=300, template="plotly_white", margin=dict(t=40, b=10, l=10, r=10))
-            
-            st.plotly_chart(fig_vol, use_container_width=True)
+
+            for i, indicator in enumerate(selected_indicators, start=1):
+                if indicator == "Volume":
+                    fig_ind.add_trace(go.Bar(x=df['Date'], y=df['Volume'], marker_color=colors, name="Volume"), row=i, col=1)
+                
+                elif indicator == "30-Day Rolling Volatility":
+                    fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['Rolling_Vol'], mode='lines', line=dict(color='purple'), name="Volatility %"), row=i, col=1)
+                
+                elif indicator == "RSI (14-Day)":
+                    fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['RSI'], mode='lines', line=dict(color='orange'), name="RSI"), row=i, col=1)
+                    fig_ind.add_hline(y=70, line_dash="dot", line_color="red", row=i, col=1)
+                    fig_ind.add_hline(y=30, line_dash="dot", line_color="green", row=i, col=1)
+                
+                elif indicator == "MACD":
+                    fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['MACD'], mode='lines', line=dict(color='blue'), name="MACD"), row=i, col=1)
+                    fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['Signal_Line'], mode='lines', line=dict(color='red'), name="Signal Line"), row=i, col=1)
+                    fig_ind.add_trace(go.Bar(x=df['Date'], y=df['MACD'] - df['Signal_Line'], marker_color='gray', name="Histogram"), row=i, col=1)
+
+            plot_height = 250 * num_plots
+            fig_ind.update_layout(height=plot_height, template="plotly_white", showlegend=False, margin=dict(t=30, b=10, l=10, r=10))
+            st.plotly_chart(fig_ind, use_container_width=True)
+
+        # --- Panel 4: Indicator Glossary ---
+        st.markdown("---")
+        with st.expander("📚 Glossary of Technical Indicators"):
+            st.markdown("""
+            * **Volume:** The number of shares traded during a given timeframe. Green bars indicate the closing price was higher than the opening price; red indicates it was lower.
+            * **30-Day Rolling Volatility:** Measures how wildly the stock price swings over a 30-day window, annualized. A spike means the stock is becoming riskier/more unpredictable.
+            * **RSI (Relative Strength Index):** A momentum oscillator ranging from 0 to 100. 
+                * *Above 70 (Red Line):* The stock may be "overbought" and due for a pullback.
+                * *Below 30 (Green Line):* The stock may be "oversold" and due for a bounce.
+            * **MACD (Moving Average Convergence Divergence):** Shows the relationship between two moving averages (usually 12-day and 26-day).
+                * When the blue MACD line crosses *above* the red signal line, it is generally considered a bullish (buy) signal.
+                * When it crosses *below*, it is a bearish (sell) signal. The grey histogram shows the distance between the two lines.
+            """)
