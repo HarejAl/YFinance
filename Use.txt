@@ -1,0 +1,5 @@
+New terminal (In VS Code upper left corner)
+
+In powershell, navigate to +> and click Command Prompt
+
+Copy and paste: streamlit run app.py
