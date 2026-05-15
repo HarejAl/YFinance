@@ -9,11 +9,11 @@ from sklearn.metrics import r2_score
 
 # --- App Configuration ---
 st.set_page_config(page_title="Stock Trend & Projection Analyzer", layout="wide")
-st.title("📈 Stock Trend & Future Projection Analyzer")
+st.title("Quantitative Trend Analyzer")
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
-ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., SPY, AAPL, TSLA, ^GSPC)", value="SPY").upper()
+ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., TSLA, AAPL, GSPC)", value="NVDA").upper()
 p_years = st.sidebar.slider("P: Historical Years to analyze", min_value=1, max_value=20, value=5)
 
 st.sidebar.markdown("---")
@@ -30,19 +30,25 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Bottom Panel Metrics")
 show_fundamentals = st.sidebar.checkbox("Show Current Fundamentals Summary", value=True)
 
-# ADDED "Closing Price" to the options here:
 selected_indicators = st.sidebar.multiselect(
     "Select Historical Indicators to Plot:",
     ["Closing Price", "Volume", "30-Day Rolling Volatility", "RSI (14-Day)", "MACD"],
     default=["Closing Price", "Volume"]
 )
 
+show_sp500_comp = st.sidebar.checkbox("Compare vs S&P 500", value=True)
+
 @st.cache_data
 def load_data(ticker, years):
     end_date = datetime.now()
-    # Always pull a little extra for the 52-week calculations if P is small
     start_date = end_date - timedelta(days=max(years, 1) * 365.25 + 30) 
     df = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
+    return df
+
+@st.cache_data
+def load_benchmark(start_date, end_date):
+    # SPY is used as the standard proxy for the S&P 500
+    df = yf.download('SPY', start=start_date, end=end_date)
     return df
 
 @st.cache_data
@@ -113,8 +119,8 @@ if ticker:
         
         st.subheader(f"Historical Analysis: {ticker}")
         col1, col2 = st.columns(2)
-        col1.metric("$R^2$ (Fit Quality)", f"{r2:.4f}", help="Measures how closely the fitted line matches actual price.")
-        col2.metric("Normalized $\sigma$ (Relative Volatility)", f"{(norm_std * 100):.2f}%", help="Standard deviation relative to the trendline.")
+        col1.metric("R-Squared (Fit Quality)", f"{r2:.4f}", help="Measures how closely the fitted line matches actual price.")
+        col2.metric("Normalized Volatility", f"{(norm_std * 100):.2f}%", help="Standard deviation relative to the trendline.")
 
         # 3. Future Prediction
         last_date = df['Date'].max()
@@ -139,17 +145,17 @@ if ticker:
         fig = go.Figure()
 
         fig.add_trace(go.Scatter(x=dates_hist, y=hist_upper_bound, mode='lines', line=dict(width=0), showlegend=False))
-        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)', name='Red Shadow (+σ)'))
+        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)', name='Red Shadow (+1σ)'))
 
         fig.add_trace(go.Scatter(x=dates_hist, y=hist_lower_bound, mode='lines', line=dict(width=0), showlegend=False))
-        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)', name='Green Shadow (-σ)'))
+        fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)', name='Green Shadow (-1σ)'))
 
         fig.add_trace(go.Scatter(x=dates_hist, y=y_hist, mode='lines', name='Actual Price', line=dict(color='black', width=1.5)))
         fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', name=model_name, line=dict(color='blue', dash='dash')))
 
         fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(best_scenario), mode='lines', name='Best Scenario (+1σ)', line=dict(color='green', dash='dot', width=2)))
         fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(worst_scenario), mode='lines', name='Worst Scenario (-1σ)', line=dict(color='red', dash='dot', width=2)))
-        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(average_scenario), mode='lines', name='Average/Expected Trend', line=dict(color='grey', dash='dash', width=2)))
+        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(average_scenario), mode='lines', name='Expected Trend', line=dict(color='grey', dash='dash', width=2)))
 
         # fig.add_vline(x=last_date.strftime('%Y-%m-%d'), line_width=2, line_dash="solid", line_color="black", annotation_text="TODAY", annotation_position="top left")
 
@@ -209,22 +215,16 @@ if ticker:
             colors = ['green' if row['Close'] >= row['Open'] else 'red' for index, row in df.iterrows()]
 
             for i, indicator in enumerate(selected_indicators, start=1):
-                
-                # ADDED Closing Price logic here
                 if indicator == "Closing Price":
                     fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['Close'], mode='lines', line=dict(color='black'), name="Close"), row=i, col=1)
-
                 elif indicator == "Volume":
                     fig_ind.add_trace(go.Bar(x=df['Date'], y=df['Volume'], marker_color=colors, name="Volume"), row=i, col=1)
-                
                 elif indicator == "30-Day Rolling Volatility":
                     fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['Rolling_Vol'], mode='lines', line=dict(color='purple'), name="Volatility %"), row=i, col=1)
-                
                 elif indicator == "RSI (14-Day)":
                     fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['RSI'], mode='lines', line=dict(color='orange'), name="RSI"), row=i, col=1)
                     fig_ind.add_hline(y=70, line_dash="dot", line_color="red", row=i, col=1)
                     fig_ind.add_hline(y=30, line_dash="dot", line_color="green", row=i, col=1)
-                
                 elif indicator == "MACD":
                     fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['MACD'], mode='lines', line=dict(color='blue'), name="MACD"), row=i, col=1)
                     fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['Signal_Line'], mode='lines', line=dict(color='red'), name="Signal Line"), row=i, col=1)
@@ -234,9 +234,55 @@ if ticker:
             fig_ind.update_layout(height=plot_height, template="plotly_white", showlegend=False, margin=dict(t=30, b=10, l=10, r=10))
             st.plotly_chart(fig_ind, use_container_width=True)
 
-        # --- Panel 4: Indicator Glossary ---
+        # --- Panel 4: S&P 500 Comparison ---
+        if show_sp500_comp:
+            st.markdown("---")
+            st.subheader(f"Relative Performance: {ticker} vs S&P 500")
+            
+            with st.spinner("Fetching S&P 500 benchmark data..."):
+                spy_raw = load_benchmark(df['Date'].min().strftime('%Y-%m-%d'), df['Date'].max().strftime('%Y-%m-%d'))
+                
+            if not spy_raw.empty:
+                if isinstance(spy_raw.columns, pd.MultiIndex):
+                    spy_raw.columns = spy_raw.columns.get_level_values(0)
+                spy_raw = spy_raw.reset_index()
+                
+                # Merge on Date to ensure perfectly aligned trading days
+                comp_df = pd.merge(df[['Date', 'Close']], spy_raw[['Date', 'Close']], on='Date', suffixes=(f'_{ticker}', '_SPY'))
+                
+                # Normalize: Value of $1 invested on Day 1
+                comp_df[f'Norm_{ticker}'] = comp_df[f'Close_{ticker}'] / comp_df[f'Close_{ticker}'].iloc[0]
+                comp_df['Norm_SPY'] = comp_df['Close_SPY'] / comp_df['Close_SPY'].iloc[0]
+                
+                fig_comp = go.Figure()
+                fig_comp.add_trace(go.Scatter(x=comp_df['Date'], y=comp_df[f'Norm_{ticker}'], mode='lines', name=ticker, line=dict(color='blue', width=2)))
+                fig_comp.add_trace(go.Scatter(x=comp_df['Date'], y=comp_df['Norm_SPY'], mode='lines', name='S&P 500 (SPY)', line=dict(color='grey', width=2)))
+                
+                # Format y-axis to show dollar multiplier (e.g., $1.50)
+                fig_comp.update_layout(
+                    title=f"Growth of $1 Invested ({p_years} Years)",
+                    xaxis_title="Date",
+                    yaxis_title="Multiplier ($)",
+                    yaxis_tickprefix="$",
+                    yaxis_tickformat=".2f",
+                    height=450,
+                    template="plotly_white",
+                    hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+                st.plotly_chart(fig_comp, use_container_width=True)
+                
+                # Calculate final relative return for text display
+                ret_ticker = (comp_df[f'Norm_{ticker}'].iloc[-1] - 1) * 100
+                ret_spy = (comp_df['Norm_SPY'].iloc[-1] - 1) * 100
+                st.caption(f"**Total Return over {p_years} Years:** {ticker}: {ret_ticker:.2f}% | S&P 500: {ret_spy:.2f}%")
+            else:
+                st.warning("Could not load benchmark data for comparison.")
+
+        # --- Panel 5: Indicator Glossary ---
         st.markdown("---")
-        with st.expander("📚 Glossary of Technical Indicators"):
+        with st.expander("Glossary of Technical Indicators"):
             st.markdown("""
             * **Closing Price:** The standard, unadjusted raw closing price of the asset.
             * **Volume:** The number of shares traded during a given timeframe. Green bars indicate the closing price was higher than the opening price; red indicates it was lower.
