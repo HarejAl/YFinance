@@ -13,7 +13,7 @@ st.title("Quantitative Trend Analyzer")
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
-ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., TSLA, AAPL, GSPC)", value="NVDA").upper()
+ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., TSLA, AAPL, NVDA)", value="NVDA").upper()
 p_years = st.sidebar.slider("P: Historical Years to analyze", min_value=1, max_value=20, value=5)
 
 st.sidebar.markdown("---")
@@ -24,7 +24,8 @@ else:
     poly_order = 1 
 
 st.sidebar.markdown("---")
-y_years = st.sidebar.slider("Y: Future Years to predict", min_value=1, max_value=10, value=2)
+# CHANGED: min_value is now 0
+y_years = st.sidebar.slider("Y: Future Years to predict", min_value=0, max_value=10, value=2)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Bottom Panel Metrics")
@@ -47,7 +48,6 @@ def load_data(ticker, years):
 
 @st.cache_data
 def load_benchmark(start_date, end_date):
-    # SPY is used as the standard proxy for the S&P 500
     df = yf.download('SPY', start=start_date, end=end_date)
     return df
 
@@ -58,7 +58,7 @@ def load_fundamentals(ticker):
 
 if ticker:
     with st.spinner(f"Loading data for {ticker}..."):
-        raw_df = load_data(ticker, p_years)
+        raw_df = load_data(ticker, p_years).copy()
         
     if raw_df.empty:
         st.error(f"Could not load data for {ticker}. Please check the ticker symbol.")
@@ -66,7 +66,6 @@ if ticker:
         if isinstance(raw_df.columns, pd.MultiIndex):
             raw_df.columns = raw_df.columns.get_level_values(0)
             
-        # Filter dataframe strictly to the requested P years for the main plot
         cutoff_date = pd.to_datetime(datetime.now() - timedelta(days=p_years * 365.25))
         df = raw_df[raw_df.index >= cutoff_date].copy()
         
@@ -78,6 +77,7 @@ if ticker:
         y_hist = df['Close'].values
         dates_hist = df['Date']
         current_price = y_hist[-1]
+        last_date = df['Date'].max()
         
         # --- CALCULATE NEW INDICATORS ---
         df['Daily_Return'] = df['Close'].pct_change()
@@ -122,24 +122,23 @@ if ticker:
         col1.metric("R-Squared (Fit Quality)", f"{r2:.4f}", help="Measures how closely the fitted line matches actual price.")
         col2.metric("Normalized Volatility", f"{(norm_std * 100):.2f}%", help="Standard deviation relative to the trendline.")
 
-        # 3. Future Prediction
-        last_date = df['Date'].max()
-        last_day_val = x_hist[-1]
-        
-        future_days = y_years * 365
-        x_future = np.linspace(last_day_val + 1, last_day_val + future_days, future_days)
-        dates_future = [pd.to_datetime(last_date) + timedelta(days=int(d)) for d in range(1, future_days + 1)]
-        
-        if model_type == "Polynomial":
-            average_scenario = poly_eq(x_future)
-        elif model_type == "Exponential":
-            average_scenario = A * np.exp(B * x_future)
+        # 3. Future Prediction (CONDITIONAL)
+        if y_years > 0:
+            last_day_val = x_hist[-1]
+            future_days = y_years * 365
+            x_future = np.linspace(last_day_val + 1, last_day_val + future_days, future_days)
+            dates_future = [pd.to_datetime(last_date) + timedelta(days=int(d)) for d in range(1, future_days + 1)]
             
-        time_in_years = np.linspace(1/365, y_years, future_days)
-        expanding_uncertainty = norm_std * np.sqrt(time_in_years)
-        
-        best_scenario = average_scenario * (1 + expanding_uncertainty)
-        worst_scenario = average_scenario * (1 - expanding_uncertainty)
+            if model_type == "Polynomial":
+                average_scenario = poly_eq(x_future)
+            elif model_type == "Exponential":
+                average_scenario = A * np.exp(B * x_future)
+                
+            time_in_years = np.linspace(1/365, y_years, future_days)
+            expanding_uncertainty = norm_std * np.sqrt(time_in_years)
+            
+            best_scenario = average_scenario * (1 + expanding_uncertainty)
+            worst_scenario = average_scenario * (1 - expanding_uncertainty)
 
         # --- Plotting Main Chart ---
         fig = go.Figure()
@@ -153,13 +152,17 @@ if ticker:
         fig.add_trace(go.Scatter(x=dates_hist, y=y_hist, mode='lines', name='Actual Price', line=dict(color='black', width=1.5)))
         fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', name=model_name, line=dict(color='blue', dash='dash')))
 
-        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(best_scenario), mode='lines', name='Best Scenario (+1σ)', line=dict(color='green', dash='dot', width=2)))
-        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(worst_scenario), mode='lines', name='Worst Scenario (-1σ)', line=dict(color='red', dash='dot', width=2)))
-        fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(average_scenario), mode='lines', name='Expected Trend', line=dict(color='grey', dash='dash', width=2)))
+        # CONDITIONAL FUTURE PLOTTING
+        if y_years > 0:
+            fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(best_scenario), mode='lines', name='Best Scenario (+1σ)', line=dict(color='green', dash='dot', width=2)))
+            fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(worst_scenario), mode='lines', name='Worst Scenario (-1σ)', line=dict(color='red', dash='dot', width=2)))
+            fig.add_trace(go.Scatter(x=[last_date] + dates_future, y=[y_fit[-1]] + list(average_scenario), mode='lines', name='Expected Trend', line=dict(color='grey', dash='dash', width=2)))
 
         # fig.add_vline(x=last_date.strftime('%Y-%m-%d'), line_width=2, line_dash="solid", line_color="black", annotation_text="TODAY", annotation_position="top left")
 
-        fig.update_layout(title=f"{ticker} Price Projection ({model_type} Model)", xaxis_title="Date", yaxis_title="Price", height=600, template="plotly_white")
+        # Dynamic Title depending on Y
+        chart_title = f"{ticker} Price Projection ({model_type} Model)" if y_years > 0 else f"{ticker} Historical Fit ({model_type} Model)"
+        fig.update_layout(title=chart_title, xaxis_title="Date", yaxis_title="Price", height=600, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
         # --- Panel 2: Fundamentals Summary & 52-Week Range ---
@@ -240,43 +243,63 @@ if ticker:
             st.subheader(f"Relative Performance: {ticker} vs S&P 500")
             
             with st.spinner("Fetching S&P 500 benchmark data..."):
-                spy_raw = load_benchmark(df['Date'].min().strftime('%Y-%m-%d'), df['Date'].max().strftime('%Y-%m-%d'))
+                spy_raw = load_benchmark(df['Date'].min().strftime('%Y-%m-%d'), df['Date'].max().strftime('%Y-%m-%d')).copy()
                 
             if not spy_raw.empty:
                 if isinstance(spy_raw.columns, pd.MultiIndex):
                     spy_raw.columns = spy_raw.columns.get_level_values(0)
                 spy_raw = spy_raw.reset_index()
                 
-                # Merge on Date to ensure perfectly aligned trading days
-                comp_df = pd.merge(df[['Date', 'Close']], spy_raw[['Date', 'Close']], on='Date', suffixes=(f'_{ticker}', '_SPY'))
+                if ticker == "SPY":
+                    fig_comp = go.Figure()
+                    norm_spy = df['Close'] / df['Close'].iloc[0]
+                    fig_comp.add_trace(go.Scatter(x=df['Date'], y=norm_spy, mode='lines', name='S&P 500 (SPY)', line=dict(color='blue', width=2)))
+                    
+                    fig_comp.update_layout(
+                        title=f"Growth of $1 Invested ({p_years} Years)",
+                        xaxis_title="Date",
+                        yaxis_title="Multiplier ($)",
+                        yaxis_tickprefix="$",
+                        yaxis_tickformat=".2f",
+                        height=450,
+                        template="plotly_white",
+                        hovermode="x unified"
+                    )
+                    st.plotly_chart(fig_comp, use_container_width=True)
+                    
+                    ret_spy = (norm_spy.iloc[-1] - 1) * 100
+                    st.caption(f"**Total Return over {p_years} Years:** S&P 500: {ret_spy:.2f}%")
                 
-                # Normalize: Value of $1 invested on Day 1
-                comp_df[f'Norm_{ticker}'] = comp_df[f'Close_{ticker}'] / comp_df[f'Close_{ticker}'].iloc[0]
-                comp_df['Norm_SPY'] = comp_df['Close_SPY'] / comp_df['Close_SPY'].iloc[0]
-                
-                fig_comp = go.Figure()
-                fig_comp.add_trace(go.Scatter(x=comp_df['Date'], y=comp_df[f'Norm_{ticker}'], mode='lines', name=ticker, line=dict(color='blue', width=2)))
-                fig_comp.add_trace(go.Scatter(x=comp_df['Date'], y=comp_df['Norm_SPY'], mode='lines', name='S&P 500 (SPY)', line=dict(color='grey', width=2)))
-                
-                # Format y-axis to show dollar multiplier (e.g., $1.50)
-                fig_comp.update_layout(
-                    title=f"Growth of $1 Invested ({p_years} Years)",
-                    xaxis_title="Date",
-                    yaxis_title="Multiplier ($)",
-                    yaxis_tickprefix="$",
-                    yaxis_tickformat=".2f",
-                    height=450,
-                    template="plotly_white",
-                    hovermode="x unified",
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                )
-                
-                st.plotly_chart(fig_comp, use_container_width=True)
-                
-                # Calculate final relative return for text display
-                ret_ticker = (comp_df[f'Norm_{ticker}'].iloc[-1] - 1) * 100
-                ret_spy = (comp_df['Norm_SPY'].iloc[-1] - 1) * 100
-                st.caption(f"**Total Return over {p_years} Years:** {ticker}: {ret_ticker:.2f}% | S&P 500: {ret_spy:.2f}%")
+                else:
+                    df_target = df[['Date', 'Close']].rename(columns={'Close': 'Close_Target'})
+                    df_spy = spy_raw[['Date', 'Close']].rename(columns={'Close': 'Close_SPY'})
+                    
+                    comp_df = pd.merge(df_target, df_spy, on='Date', how='inner')
+                    
+                    comp_df['Norm_Target'] = comp_df['Close_Target'] / comp_df['Close_Target'].iloc[0]
+                    comp_df['Norm_SPY'] = comp_df['Close_SPY'] / comp_df['Close_SPY'].iloc[0]
+                    
+                    fig_comp = go.Figure()
+                    fig_comp.add_trace(go.Scatter(x=comp_df['Date'], y=comp_df['Norm_Target'], mode='lines', name=ticker, line=dict(color='blue', width=2)))
+                    fig_comp.add_trace(go.Scatter(x=comp_df['Date'], y=comp_df['Norm_SPY'], mode='lines', name='S&P 500 (SPY)', line=dict(color='grey', width=2)))
+                    
+                    fig_comp.update_layout(
+                        title=f"Growth of $1 Invested ({p_years} Years)",
+                        xaxis_title="Date",
+                        yaxis_title="Multiplier ($)",
+                        yaxis_tickprefix="$",
+                        yaxis_tickformat=".2f",
+                        height=450,
+                        template="plotly_white",
+                        hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    
+                    st.plotly_chart(fig_comp, use_container_width=True)
+                    
+                    ret_target = (comp_df['Norm_Target'].iloc[-1] - 1) * 100
+                    ret_spy = (comp_df['Norm_SPY'].iloc[-1] - 1) * 100
+                    st.caption(f"**Total Return over {p_years} Years:** {ticker}: {ret_target:.2f}% | S&P 500: {ret_spy:.2f}%")
             else:
                 st.warning("Could not load benchmark data for comparison.")
 
