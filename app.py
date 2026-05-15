@@ -13,7 +13,7 @@ st.title("📈 Stock Trend & Future Projection Analyzer")
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
-ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., AAPL, TSLA)", value="AAPL").upper()
+ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., SPY, AAPL, TSLA, ^GSPC)", value="SPY").upper()
 p_years = st.sidebar.slider("P: Historical Years to analyze", min_value=1, max_value=20, value=5)
 
 st.sidebar.markdown("---")
@@ -30,16 +30,18 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Bottom Panel Metrics")
 show_fundamentals = st.sidebar.checkbox("Show Current Fundamentals Summary", value=True)
 
+# ADDED "Closing Price" to the options here:
 selected_indicators = st.sidebar.multiselect(
     "Select Historical Indicators to Plot:",
-    ["Volume", "30-Day Rolling Volatility", "RSI (14-Day)", "MACD"],
-    default=["Volume", "30-Day Rolling Volatility"]
+    ["Closing Price", "Volume", "30-Day Rolling Volatility", "RSI (14-Day)", "MACD"],
+    default=["Closing Price", "Volume"]
 )
 
 @st.cache_data
 def load_data(ticker, years):
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=years * 365.25)
+    # Always pull a little extra for the 52-week calculations if P is small
+    start_date = end_date - timedelta(days=max(years, 1) * 365.25 + 30) 
     df = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'), end=end_date.strftime('%Y-%m-%d'))
     return df
 
@@ -50,14 +52,18 @@ def load_fundamentals(ticker):
 
 if ticker:
     with st.spinner(f"Loading data for {ticker}..."):
-        df = load_data(ticker, p_years)
+        raw_df = load_data(ticker, p_years)
         
-    if df.empty:
+    if raw_df.empty:
         st.error(f"Could not load data for {ticker}. Please check the ticker symbol.")
     else:
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        if isinstance(raw_df.columns, pd.MultiIndex):
+            raw_df.columns = raw_df.columns.get_level_values(0)
             
+        # Filter dataframe strictly to the requested P years for the main plot
+        cutoff_date = pd.to_datetime(datetime.now() - timedelta(days=p_years * 365.25))
+        df = raw_df[raw_df.index >= cutoff_date].copy()
+        
         # 1. Prepare Historical Data
         df = df.reset_index()
         df['Days'] = (df['Date'] - df['Date'].min()).dt.days
@@ -65,6 +71,7 @@ if ticker:
         x_hist = df['Days'].values
         y_hist = df['Close'].values
         dates_hist = df['Date']
+        current_price = y_hist[-1]
         
         # --- CALCULATE NEW INDICATORS ---
         df['Daily_Return'] = df['Close'].pct_change()
@@ -149,13 +156,34 @@ if ticker:
         fig.update_layout(title=f"{ticker} Price Projection ({model_type} Model)", xaxis_title="Date", yaxis_title="Price", height=600, template="plotly_white")
         st.plotly_chart(fig, use_container_width=True)
 
-        # --- Panel 2: Fundamentals Summary ---
+        # --- Panel 2: Fundamentals Summary & 52-Week Range ---
         if show_fundamentals:
             st.markdown("---")
             st.subheader(f"Current Fundamental Snapshot: {ticker}")
             with st.spinner("Fetching fundamentals..."):
                 info = load_fundamentals(ticker)
+            
+            st.markdown("##### 52-Week Range")
+            low_52w = info.get('fiftyTwoWeekLow') or raw_df['Close'].tail(252).min()
+            high_52w = info.get('fiftyTwoWeekHigh') or raw_df['Close'].tail(252).max()
+            
+            if low_52w and high_52w and low_52w != high_52w:
+                range_percent = (current_price - low_52w) / (high_52w - low_52w)
+                range_percent = max(0.0, min(1.0, range_percent))
                 
+                col_min, col_slider, col_max = st.columns([1, 8, 1])
+                with col_min:
+                    st.write(f"**MIN:** \n${low_52w:.2f}")
+                with col_slider:
+                    st.progress(range_percent)
+                    st.markdown(f"<div style='text-align: center; color: gray; margin-top: -10px;'><b>Today:</b> ${current_price:.2f}</div>", unsafe_allow_html=True)
+                with col_max:
+                    st.write(f"**MAX:** \n${high_52w:.2f}")
+            else:
+                st.write("*52-Week range data unavailable.*")
+
+            st.write("")
+            
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Beta", round(info.get('beta', 0), 2) if info.get('beta') else "N/A", help="Systemic risk vs market.")
             col2.metric("Trailing P/E", round(info.get('trailingPE', 0), 2) if info.get('trailingPE') else "N/A", help="Current price / past 12m EPS.")
@@ -181,7 +209,12 @@ if ticker:
             colors = ['green' if row['Close'] >= row['Open'] else 'red' for index, row in df.iterrows()]
 
             for i, indicator in enumerate(selected_indicators, start=1):
-                if indicator == "Volume":
+                
+                # ADDED Closing Price logic here
+                if indicator == "Closing Price":
+                    fig_ind.add_trace(go.Scatter(x=df['Date'], y=df['Close'], mode='lines', line=dict(color='black'), name="Close"), row=i, col=1)
+
+                elif indicator == "Volume":
                     fig_ind.add_trace(go.Bar(x=df['Date'], y=df['Volume'], marker_color=colors, name="Volume"), row=i, col=1)
                 
                 elif indicator == "30-Day Rolling Volatility":
@@ -205,6 +238,7 @@ if ticker:
         st.markdown("---")
         with st.expander("📚 Glossary of Technical Indicators"):
             st.markdown("""
+            * **Closing Price:** The standard, unadjusted raw closing price of the asset.
             * **Volume:** The number of shares traded during a given timeframe. Green bars indicate the closing price was higher than the opening price; red indicates it was lower.
             * **30-Day Rolling Volatility:** Measures how wildly the stock price swings over a 30-day window, annualized. A spike means the stock is becoming riskier/more unpredictable.
             * **RSI (Relative Strength Index):** A momentum oscillator ranging from 0 to 100. 
