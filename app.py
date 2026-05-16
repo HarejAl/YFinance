@@ -94,6 +94,9 @@ if ticker:
             y_val = full_hist_df.loc[val_mask, 'Close'].values
             dates_val = full_hist_df.loc[val_mask, 'Date']
             
+            x_full = full_hist_df['Days'].values
+            y_full = full_hist_df['Close'].values
+            
             # 2. Fit the Model (STRICTLY ON TRAINING DATA)
             if model_type == "Polynomial":
                 coeffs = np.polyfit(x_train, y_train, poly_order)
@@ -214,6 +217,22 @@ if ticker:
             st.markdown("#### Model Performance & Future Scenarios")
             r2_val_display = f"{r2_val:.4f}" if r2_val is not None else "N/A (V=0%)"
             
+            # Formatted Scenario Strings with Percentages
+            expected_str = "N/A"
+            upper_str = "N/A"
+            lower_str = "N/A"
+            
+            if y_years > 0 and total_proj_days > 0:
+                base_price = y_full[-1] # The true "Today" price
+                
+                expected_pct = ((final_expected / base_price) - 1) * 100
+                upper_pct = ((final_upper / base_price) - 1) * 100
+                lower_pct = ((final_lower / base_price) - 1) * 100
+                
+                expected_str = f"${final_expected:.2f} ({expected_pct:+.1f}%)"
+                upper_str = f"${final_upper:.2f} ({upper_pct:+.1f}%)"
+                lower_str = f"${final_lower:.2f} ({lower_pct:+.1f}%)"
+
             table_data = {
                 "Metric / Scenario": [
                     "Training R-Squared",
@@ -231,9 +250,9 @@ if ticker:
                     coverage_pct,
                     rmse,
                     f"{(norm_std * 100):.2f}%",
-                    f"${final_expected:.2f}" if y_years > 0 else "N/A",
-                    f"${final_upper:.2f}" if y_years > 0 else "N/A",
-                    f"${final_lower:.2f}" if y_years > 0 else "N/A"
+                    expected_str,
+                    upper_str,
+                    lower_str
                 ]
             }
             metrics_df = pd.DataFrame(table_data)
