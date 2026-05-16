@@ -9,7 +9,7 @@ from sklearn.metrics import r2_score
 
 # --- App Configuration ---
 st.set_page_config(page_title="Stock Trend & Projection Analyzer", layout="wide")
-st.title("Quantitative Trend Analyzer & Backtester")
+st.title("Quantitative Trend Analyzer")
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
@@ -18,6 +18,8 @@ ticker = st.sidebar.text_input("Stock/ETF Ticker (e.g., SPY, AAPL, NVDA)", value
 st.sidebar.markdown("---")
 st.sidebar.subheader("Model Parameters")
 p_years = st.sidebar.slider("P: Historical Years to analyze", min_value=1, max_value=20, value=5)
+v_pct = st.sidebar.slider("V: Validation Split (%)", min_value=0, max_value=50, value=20, help="Percentage of recent historical data to hold out for validation.")
+
 model_type = st.sidebar.radio("Fitting Model", options=["Polynomial", "Exponential"])
 if model_type == "Polynomial":
     poly_order = st.sidebar.slider("n: Polynomial Order", min_value=1, max_value=5, value=2)
@@ -26,7 +28,7 @@ else:
 y_years = st.sidebar.slider("Y: Future Years to predict", min_value=0, max_value=10, value=2)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Live Panel Metrics")
+st.sidebar.subheader("Panel Metrics")
 show_fundamentals = st.sidebar.checkbox("Show Current Fundamentals Summary", value=True)
 
 selected_indicators = st.sidebar.multiselect(
@@ -57,119 +59,7 @@ def load_fundamentals(ticker):
     stock = yf.Ticker(ticker)
     return stock.info
 
-# --- THE CORE MATH & PLOTTING ENGINE ---
-def generate_projection_chart(df, ticker, simulated_today, p_years, y_years, model_type, poly_order, is_backtest=False):
-    start_train_date = simulated_today - timedelta(days=p_years * 365.25)
-    train_df = df[(df['Date'] >= start_train_date) & (df['Date'] <= simulated_today)].copy()
-    
-    if train_df.empty or len(train_df) < 50:
-        st.error("Not enough historical data for this date range.")
-        return None
-
-    end_test_date = simulated_today + timedelta(days=max(y_years, 1) * 365.25)
-    future_actual_df = df[(df['Date'] > simulated_today) & (df['Date'] <= end_test_date)].copy()
-
-    train_df['Days'] = (train_df['Date'] - train_df['Date'].min()).dt.days
-    x_hist = train_df['Days'].values
-    y_hist = train_df['Close'].values
-    dates_hist = train_df['Date']
-    
-    if model_type == "Polynomial":
-        coeffs = np.polyfit(x_hist, y_hist, poly_order)
-        poly_eq = np.poly1d(coeffs)
-        y_fit = poly_eq(x_hist)
-        model_name = f'Poly Fit (n={poly_order})'
-    elif model_type == "Exponential":
-        coeffs = np.polyfit(x_hist, np.log(y_hist), 1)
-        B = coeffs[0]
-        A = np.exp(coeffs[1])
-        y_fit = A * np.exp(B * x_hist)
-        model_name = 'Exponential Fit'
-
-    r2_train = r2_score(y_hist, y_fit)
-    normalized_residuals = (y_hist - y_fit) / y_fit
-    norm_std = np.std(normalized_residuals)
-    
-    hist_upper_bound = y_fit * (1 + norm_std)
-    hist_lower_bound = y_fit * (1 - norm_std)
-    
-    st.subheader(f"Historical Training Stats ({start_train_date.strftime('%Y')} to {simulated_today.strftime('%Y')})")
-    col1, col2 = st.columns(2)
-    col1.metric("Training R-Squared (Fit Quality)", f"{r2_train:.4f}")
-    col2.metric("Historical Volatility", f"{(norm_std * 100):.2f}%")
-
-    if y_years > 0:
-        future_days = y_years * 365
-        last_day_val = x_hist[-1]
-        x_future = np.linspace(last_day_val + 1, last_day_val + future_days, future_days)
-        dates_future = [simulated_today + timedelta(days=int(d)) for d in range(1, future_days + 1)]
-        
-        if model_type == "Polynomial":
-            average_scenario = poly_eq(x_future)
-        elif model_type == "Exponential":
-            average_scenario = A * np.exp(B * x_future)
-            
-        time_in_years = np.linspace(1/365, y_years, future_days)
-        expanding_uncertainty = norm_std * np.sqrt(time_in_years)
-        
-        best_scenario = average_scenario * (1 + expanding_uncertainty)
-        worst_scenario = average_scenario * (1 - expanding_uncertainty)
-
-        if is_backtest and not future_actual_df.empty:
-            pred_df = pd.DataFrame({
-                'Date': pd.to_datetime(dates_future),
-                'Expected': average_scenario,
-                'Upper': best_scenario,
-                'Lower': worst_scenario
-            })
-            eval_df = pd.merge(future_actual_df[['Date', 'Close']], pred_df, on='Date', how='inner')
-            
-            if not eval_df.empty:
-                inside_cone = ((eval_df['Close'] <= eval_df['Upper']) & (eval_df['Close'] >= eval_df['Lower'])).sum()
-                coverage_pct = (inside_cone / len(eval_df)) * 100
-                rmse = np.sqrt(np.mean((eval_df['Close'] - eval_df['Expected'])**2))
-                future_r2 = r2_score(eval_df['Close'], eval_df['Expected'])
-                
-                st.markdown("---")
-                st.markdown("#### Backtest Prediction Accuracy (Future Data)")
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("Coverage (±1σ Cone)", f"{coverage_pct:.1f}%")
-                col_b.metric("RMSE (Avg Dollar Error)", f"${rmse:.2f}")
-                r2_color = "green" if future_r2 > 0 else "red"
-                col_c.markdown(f"""
-                    <div style='padding-top: 1rem;'>
-                        <p style='margin: 0; font-size: 0.8rem; color: gray;'>Future R² Score</p>
-                        <h3 style='margin: 0; color: {r2_color};'>{future_r2:.4f}</h3>
-                    </div>
-                """, unsafe_allow_html=True)
-                st.markdown("---")
-
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(x=dates_hist, y=hist_upper_bound, mode='lines', line=dict(width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)', name='Red Shadow (+σ)'))
-    fig.add_trace(go.Scatter(x=dates_hist, y=hist_lower_bound, mode='lines', line=dict(width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)', name='Green Shadow (-σ)'))
-
-    fig.add_trace(go.Scatter(x=dates_hist, y=y_hist, mode='lines', name='Actual Price', line=dict(color='black', width=1.5)))
-    fig.add_trace(go.Scatter(x=dates_hist, y=y_fit, mode='lines', name=model_name, line=dict(color='blue', dash='dash')))
-
-    if y_years > 0:
-        fig.add_trace(go.Scatter(x=[simulated_today] + dates_future, y=[y_fit[-1]] + list(best_scenario), mode='lines', name='Best Scenario (+1σ)', line=dict(color='green', dash='dot', width=2)))
-        fig.add_trace(go.Scatter(x=[simulated_today] + dates_future, y=[y_fit[-1]] + list(worst_scenario), mode='lines', name='Worst Scenario (-1σ)', line=dict(color='red', dash='dot', width=2)))
-        fig.add_trace(go.Scatter(x=[simulated_today] + dates_future, y=[y_fit[-1]] + list(average_scenario), mode='lines', name='Expected Trend', line=dict(color='grey', dash='dash', width=2)))
-
-        if is_backtest and not future_actual_df.empty:
-            fig.add_trace(go.Scatter(x=future_actual_df['Date'], y=future_actual_df['Close'], mode='lines', name='ACTUAL FUTURE PRICE', line=dict(color='purple', width=2.5)))
-
-
-    title_prefix = "Backtest Simulation" if is_backtest else "Live Projection"
-    chart_type = "Projection" if y_years > 0 else "Historical Fit"
-    fig.update_layout(title=f"{title_prefix}: {ticker} {chart_type} ({model_type} Model)", xaxis_title="Date", yaxis_title="Price", height=600, template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
-
-
-# --- APP LAYOUT (TABS) ---
+# --- THE MAIN SCRIPT ---
 if ticker:
     with st.spinner("Fetching data from market..."):
         master_df = load_data(ticker, 30).copy()
@@ -177,15 +67,177 @@ if ticker:
     if master_df.empty:
         st.error(f"Could not retrieve data for {ticker}.")
     else:
-        tab1, tab2 = st.tabs(["Live Market Analysis", "Time Machine (Backtester)"])
+        st.markdown(f"### Market Projection: {ticker}")
+        
+        real_today = master_df['Date'].max()
+        start_hist_date = real_today - timedelta(days=p_years * 365.25)
+        
+        # 1. Train/Validation Time Split Logic
+        val_days_count = int((p_years * 365.25) * (v_pct / 100.0))
+        split_date = real_today - timedelta(days=val_days_count)
+        
+        full_hist_df = master_df[(master_df['Date'] >= start_hist_date) & (master_df['Date'] <= real_today)].copy()
+        
+        if len(full_hist_df) < 50:
+            st.error("Not enough historical data for this date range.")
+        else:
+            full_hist_df['Days'] = (full_hist_df['Date'] - full_hist_df['Date'].min()).dt.days
+            
+            train_mask = full_hist_df['Date'] <= split_date
+            val_mask = full_hist_df['Date'] > split_date
+            
+            x_train = full_hist_df.loc[train_mask, 'Days'].values
+            y_train = full_hist_df.loc[train_mask, 'Close'].values
+            dates_train = full_hist_df.loc[train_mask, 'Date']
+            
+            x_val = full_hist_df.loc[val_mask, 'Days'].values
+            y_val = full_hist_df.loc[val_mask, 'Close'].values
+            dates_val = full_hist_df.loc[val_mask, 'Date']
+            
+            # 2. Fit the Model (STRICTLY ON TRAINING DATA)
+            if model_type == "Polynomial":
+                coeffs = np.polyfit(x_train, y_train, poly_order)
+                poly_eq = np.poly1d(coeffs)
+                y_fit_train = poly_eq(x_train)
+                y_fit_val = poly_eq(x_val) if v_pct > 0 else []
+                model_name = f'Poly Fit (n={poly_order})'
+            elif model_type == "Exponential":
+                coeffs = np.polyfit(x_train, np.log(y_train), 1)
+                B = coeffs[0]
+                A = np.exp(coeffs[1])
+                y_fit_train = A * np.exp(B * x_train)
+                y_fit_val = A * np.exp(B * x_val) if v_pct > 0 else []
+                model_name = 'Exponential Fit'
 
-        # ==========================================
-        # TAB 1: LIVE PROJECTION & INDICATORS
-        # ==========================================
-        with tab1:
-            st.markdown("### Current Market Projection")
-            real_today = master_df['Date'].max()
-            generate_projection_chart(master_df, ticker, real_today, p_years, y_years, model_type, poly_order, is_backtest=False)
+            # Calculate R^2 Metrics
+            r2_train = r2_score(y_train, y_fit_train)
+            r2_val = r2_score(y_val, y_fit_val) if v_pct > 0 and len(y_val) > 1 else None
+            
+            # Calculate historical volatility (Q process noise) from training set residuals
+            normalized_residuals = (y_train - y_fit_train) / y_fit_train
+            norm_std = np.std(normalized_residuals)
+            
+            hist_upper_train = y_fit_train * (1 + norm_std)
+            hist_lower_train = y_fit_train * (1 - norm_std)
+
+            # 3. Projection Phase (Kalman Covariance covers Validation + Unknown Future)
+            unknown_future_days = int(y_years * 365)
+            total_proj_days = len(x_val) + unknown_future_days
+            
+            final_expected, final_upper, final_lower = 0, 0, 0
+            coverage_pct, rmse = "N/A", "N/A"
+            
+            if total_proj_days > 0:
+                last_train_day_val = x_train[-1]
+                last_train_date = dates_train.iloc[-1]
+                
+                x_proj = np.linspace(last_train_day_val + 1, last_train_day_val + total_proj_days, total_proj_days)
+                dates_proj = [last_train_date + timedelta(days=int(d)) for d in range(1, total_proj_days + 1)]
+                
+                if model_type == "Polynomial":
+                    proj_expected = poly_eq(x_proj)
+                elif model_type == "Exponential":
+                    proj_expected = A * np.exp(B * x_proj)
+                    
+                # Kalman Filter Covariance Update
+                P_t_pct = norm_std ** 2 
+                Q = np.var(np.diff(y_train))
+                T_days = np.arange(1, total_proj_days + 1)
+                
+                proj_variance = (P_t_pct * (proj_expected ** 2)) + (Q * T_days)
+                proj_uncertainty_dollars = np.sqrt(proj_variance)
+                
+                proj_upper = proj_expected + proj_uncertainty_dollars
+                proj_lower = proj_expected - proj_uncertainty_dollars
+                
+                final_expected = proj_expected[-1]
+                final_upper = proj_upper[-1]
+                final_lower = proj_lower[-1]
+
+                # Evaluate over the Validation Set if it exists
+                if v_pct > 0 and len(y_val) > 0:
+                    pred_df = pd.DataFrame({
+                        'Date': pd.to_datetime(dates_proj),
+                        'Expected': proj_expected,
+                        'Upper': proj_upper,
+                        'Lower': proj_lower
+                    })
+                    val_df_merge = full_hist_df.loc[val_mask, ['Date', 'Close']]
+                    eval_df = pd.merge(val_df_merge, pred_df, on='Date', how='inner')
+                    
+                    if not eval_df.empty:
+                        inside_cone = ((eval_df['Close'] <= eval_df['Upper']) & (eval_df['Close'] >= eval_df['Lower'])).sum()
+                        coverage_pct = f"{(inside_cone / len(eval_df)) * 100:.1f}%"
+                        rmse = f"${np.sqrt(np.mean((eval_df['Close'] - eval_df['Expected'])**2)):.2f}"
+
+            # 4. Plotting Main Chart
+            fig = go.Figure()
+
+            # Train Shadows
+            fig.add_trace(go.Scatter(x=dates_train, y=hist_upper_train, mode='lines', line=dict(width=0), showlegend=False))
+            fig.add_trace(go.Scatter(x=dates_train, y=y_fit_train, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(255, 0, 0, 0.2)', name='Red Shadow (+σ)'))
+            fig.add_trace(go.Scatter(x=dates_train, y=hist_lower_train, mode='lines', line=dict(width=0), showlegend=False))
+            fig.add_trace(go.Scatter(x=dates_train, y=y_fit_train, mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(0, 255, 0, 0.2)', name='Green Shadow (-σ)'))
+
+            # Actual Train Price & Fit
+            fig.add_trace(go.Scatter(x=dates_train, y=y_train, mode='lines', name='Actual Price (Train)', line=dict(color='black', width=1.5)))
+            fig.add_trace(go.Scatter(x=dates_train, y=y_fit_train, mode='lines', name=model_name, line=dict(color='blue', dash='dash')))
+
+            # Actual Validation Price
+            if v_pct > 0 and len(y_val) > 0:
+                conn_x = [dates_train.iloc[-1], dates_val.iloc[0]]
+                conn_y = [y_train[-1], y_val[0]]
+                fig.add_trace(go.Scatter(x=conn_x, y=conn_y, mode='lines', showlegend=False, line=dict(color='orange', width=1.5)))
+                fig.add_trace(go.Scatter(x=dates_val, y=y_val, mode='lines', name='Actual Price (Val)', line=dict(color='orange', width=2.0)))
+                fig.add_vrect(x0=split_date.strftime('%Y-%m-%d'), x1=real_today.strftime('%Y-%m-%d'), fillcolor="rgba(255, 165, 0, 0.1)", layer="below", line_width=0, annotation_text="Validation Phase", annotation_position="top left")
+                fig.add_vline(x=split_date.strftime('%Y-%m-%d'), line_width=2, line_dash="dot", line_color="orange")
+
+            # Projected Cone (Validation + Unknown Future)
+            if total_proj_days > 0:
+                proj_x_plot = [dates_train.iloc[-1]] + dates_proj
+                proj_expected_plot = [y_fit_train[-1]] + list(proj_expected)
+                proj_upper_plot = [hist_upper_train[-1]] + list(proj_upper)
+                proj_lower_plot = [hist_lower_train[-1]] + list(proj_lower)
+
+                fig.add_trace(go.Scatter(x=proj_x_plot, y=proj_upper_plot, mode='lines', name='Best Scenario (+1σ)', line=dict(color='green', dash='dot', width=2)))
+                fig.add_trace(go.Scatter(x=proj_x_plot, y=proj_lower_plot, mode='lines', name='Worst Scenario (-1σ)', line=dict(color='red', dash='dot', width=2)))
+                fig.add_trace(go.Scatter(x=proj_x_plot, y=proj_expected_plot, mode='lines', name='Expected Trend', line=dict(color='grey', dash='dash', width=2)))
+
+            # Today Line
+            # fig.add_vline(x=real_today.strftime('%Y-%m-%d'), line_width=2, line_dash="solid", line_color="black", annotation_text="TODAY", annotation_position="top left")
+
+            chart_type = "Projection" if y_years > 0 else "Historical Fit"
+            fig.update_layout(title=f"{ticker} {chart_type} ({model_type} Model)", xaxis_title="Date", yaxis_title="Price", height=600, template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 5. METRICS & SCENARIOS TABLE
+            st.markdown("#### Model Performance & Future Scenarios")
+            r2_val_display = f"{r2_val:.4f}" if r2_val is not None else "N/A (V=0%)"
+            
+            table_data = {
+                "Metric / Scenario": [
+                    "Training R-Squared",
+                    f"Validation R-Squared ({v_pct}% Holdout)",
+                    "Validation Coverage (±1σ Cone)",
+                    "Validation RMSE (Avg Dollar Error)",
+                    "Base Historical Volatility (σ)",
+                    f"Expected Target Price (in {y_years}Y)",
+                    f"Best Case (+1σ) Scenario",
+                    f"Worst Case (-1σ) Scenario"
+                ],
+                "Value": [
+                    f"{r2_train:.4f}",
+                    r2_val_display,
+                    coverage_pct,
+                    rmse,
+                    f"{(norm_std * 100):.2f}%",
+                    f"${final_expected:.2f}" if y_years > 0 else "N/A",
+                    f"${final_upper:.2f}" if y_years > 0 else "N/A",
+                    f"${final_lower:.2f}" if y_years > 0 else "N/A"
+                ]
+            }
+            metrics_df = pd.DataFrame(table_data)
+            st.dataframe(metrics_df, hide_index=True, use_container_width=True)
 
             # --- Panel: Fundamentals Summary & 52-Week Range ---
             if show_fundamentals:
@@ -255,12 +307,11 @@ if ticker:
                 
                 num_plots = len(selected_indicators)
                 
-                # --- APPLY THE FIXES HERE ---
                 fig_ind = make_subplots(
                     rows=num_plots, 
                     cols=1, 
                     shared_xaxes=True, 
-                    vertical_spacing=0.02,  # Shrink vertical spacing
+                    vertical_spacing=0.02, 
                     subplot_titles=selected_indicators
                 )
                 
@@ -284,32 +335,27 @@ if ticker:
 
                 plot_height = 250 * num_plots
                 
-            
-
                 fig_ind.update_layout(
-                    height=plot_height,
-                    template="plotly_white",
-                    showlegend=True,
+                    height=plot_height, 
+                    template="plotly_white", 
+                    showlegend=False, 
                     margin=dict(t=30, b=10, l=10, r=10),
                     hovermode="x unified",
                     hoverdistance=-1,
                     spikedistance=-1
                 )
-
+                
                 fig_ind.update_xaxes(
-                    matches="x",
                     showspikes=True,
                     spikemode="across",
                     spikesnap="cursor",
-                    spikecolor="black",
-                    spikedash="dot",
-                    spikethickness=1,
-                    showline=True
+                    showline=True,
+                    spikedash="solid",
+                    spikecolor="darkgray",
+                    spikethickness=1
                 )
-
+                
                 fig_ind.update_yaxes(showspikes=False)
-                        
-                # ------------------------------
 
                 st.plotly_chart(fig_ind, use_container_width=True)
 
@@ -382,24 +428,3 @@ if ticker:
                 * **RSI (Relative Strength Index):** A momentum oscillator ranging from 0 to 100. *Above 70:* potentially "overbought". *Below 30:* potentially "oversold".
                 * **MACD (Moving Average Convergence Divergence):** When the blue MACD line crosses *above* the red signal line, it is generally considered a bullish signal. When it crosses *below*, it is bearish.
                 """)
-
-        # ==========================================
-        # TAB 2: HISTORICAL BACKTEST SIMULATOR
-        # ==========================================
-        with tab2:
-            st.markdown("### Historical Backtest Simulator")
-            
-            col_date, col_empty = st.columns([1, 2])
-            with col_date:
-                default_backtest_date = master_df['Date'].max() - timedelta(days=2 * 365)
-                min_allowed_date = master_df['Date'].min() + timedelta(days=p_years * 365)
-                
-                simulated_date = st.date_input(
-                    "Select a simulated 'Today' date:", 
-                    value=default_backtest_date,
-                    min_value=min_allowed_date,
-                    max_value=master_df['Date'].max() - timedelta(days=30)
-                )
-            
-            simulated_date = pd.to_datetime(simulated_date)
-            generate_projection_chart(master_df, ticker, simulated_date, p_years, y_years, model_type, poly_order, is_backtest=True)
